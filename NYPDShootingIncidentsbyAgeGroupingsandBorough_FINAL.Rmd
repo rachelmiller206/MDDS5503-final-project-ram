@@ -1,0 +1,264 @@
+---
+title: "NYPD Shooting Incidents by Age Groupings and Borough"
+author: ''
+date: "2025-06-19"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Importing necessary libraries
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+```
+
+## Description of Data in This Report
+This dataset is called NYPD Shooting Incident Data (Historic), and it can be found at <https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD>.
+
+```{r, echo=TRUE}
+# This link will download the raw data used in this report
+url_in = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+# Reading the raw data into a CSV
+raw_data <- read_csv(url_in)
+# 
+if(!file.exists("Data")){dir.create("Data")}
+```
+
+This data contains a record going back to 2006 of each shooting incident recorded by the NYPD. This data is extracted quarterly, and contains details such as the location and time of the incidents, as well as some demographic information about the victims and perpetrators when available.
+
+## Goal of Analysis
+
+This report attempts to analyze the relationship between the most frequently occurring ages of perpetrators and victims, and then explores whether that relationship changes geographically across the different boroughs in New York City. Finally, a simple linear regression is performed to show the overall change in shooting incidents per year, as well as shooting incidents within the most common pairing of perpetrator and victim ages.
+
+### Examining Data
+
+1. Looked at the summary of the raw data to identify outliers from erroneous data submissions
+```{r, echo=TRUE}
+# Getting a summary of the raw data
+summary(raw_data)
+```
+2. Created a new df to perform tidying and transformations, so I can always compare to the `raw_data` dataframe
+```{r, echo=TRUE}
+# Working on a fresh copy of the raw data to preserve the original
+cleaning_df <- raw_data
+```
+### Editing Data Types and Dropping Extraneous Columns
+3. Changed data type of `OCCUR_DATE` field from character to date using mutate.
+```{r, echo=TRUE}
+# Changing the data type of date field to date
+cleaning_df <- cleaning_df %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE))
+```
+4. Since I'll be looking at the boroughs more generally for the geographic component of this analysis, I don't care about `Latitude` or `Longitude` fields and can drop these columns.
+  - For the same reason, I'll drop the columns `Lon_Lat`, `X_COORD_CD`, and `Y_COORD_CD`
+```{r, echo=TRUE}
+# Listing columns to drop, then dropping them from the working df
+drops <- c("Latitude", "Longitude", "Lon_Lat", "X_COORD_CD", "Y_COORD_CD")
+cleaning_df <- cleaning_df[, !(names(cleaning_df) %in% drops)]
+```
+5. For this analysis, we can also exclude the additional victim and perpetrator demographics of race and sex, as well as further location details like `JURISDICTION_CODE` and `LOC_OF_OCCUR_DESC`.
+  - The details may provide interesting dimensions if we choose to analyze further, but are extraneous to the current report.
+```{r, echo=TRUE}
+# Listing more columns to drop, then dropping them from the working df
+drops_2 <- c("LOC_OF_OCCUR_DESC", "PRECINCT", "JURISDICTION_CODE", "LOC_CLASSFCTN_DESC", "LOCATION_DESC", "STATISTICAL_MURDER_FLAG", "PERP_SEX", "PERP_RACE", "VIC_SEX", "VIC_RACE")
+cleaning_df <- cleaning_df[, !names(cleaning_df) %in% drops_2]
+```
+6. I am renaming the column `BORO` to `BOROUGH` for clarity.
+```{r, echo=TRUE}
+# Renaming column for clarity
+cleaning_df <- cleaning_df %>%
+  rename(BOROUGH = BORO)
+```
+The new dataframe summary looks like this:
+```{r, echo=TRUE}
+# Pulling summary of working df
+summary(cleaning_df)
+```
+### Handling Missing Data
+There is no data missing from the columns `INCIDENT_KEY`, `OCCUR_DATE`, `OCCUR_TIME`, or `BOROUGH`.
+
+`VIC_AGE_GROUP` has 100% of its values filled in, but when we look at the unique values we can see that there is some incompleteness in the data.
+
+When we look at `unique(cleaning_df$VIC_AGE_GROUP)` the value `"UNKNOWN"` shows up 63 times.
+Since these values cannot be included in the next steps of analysis, these records are dropped from the dataframe.
+
+For `PERP_AGE_GROUP` 9,344 values are missing from the 29,744 total records, about 31.4% of the total dataset. For the purposes of this analysis, I will exclude records containing null `PERP_AGE_GROUP` values from my working dataset.
+In addition, using the same look at unique values of `PERP_AGE_GROUP`, we see an additional 4,776 records with values of either `"UNKNOWN"` or `"(null)"` which are also excluded from next steps.
+
+In addition, there are some large integer values in each of these age group fields that appear to be erroneously submitted data (ex: `1028`, `224`, etc). These rows will also be dropped.
+
+It's important to note that this creates the risk of excluding data which could be useful, if we want to examine the interaction of unknown ages with known age groups. I am choosing to drop these rows since I plan to create categorical variables to represent each "approved" age grouping. Because these variables need to be consistent across both perpetrator and victim age groups, it is reasonable to exclude the "bad data" from the analysis.
+
+```{r, echo=TRUE}
+# List of data values to exclude from Perp and Vic age fields
+bad_data = c("UNKNOWN", "(null)", "1028", "1022", "1020", "940", "224", "2021")
+# Dropping NULL values
+cleaning_df <- cleaning_df[complete.cases(cleaning_df), ]
+# Excluding "bad" data
+cleaning_df <- cleaning_df[!(cleaning_df$VIC_AGE_GROUP %in% bad_data),]
+cleaning_df <- cleaning_df[!(cleaning_df$PERP_AGE_GROUP %in% bad_data),]
+```
+We are left with 15,557 complete records to analyze in the following steps.
+
+## Analysis
+### Perpetrator vs Victim Age Groups for All NYC Shooting Incidents
+#### Creating Categories for Analysis
+The age groups we will be comparing are the following:
+
+1. <18
+2. 18-24
+3. 25-44
+4. 45-64
+5. 65+
+
+To prep for analysis of age groupings, I want to create new columns that categorize age groups for perpetrators and victims as numeric values rather than characters. These categories go from lowest to highest with age.
+```{r, echo=TRUE}
+# Creating categorical variable for perpetrator age groupings
+cleaning_df$perp_cat <- as.factor(ifelse(cleaning_df$PERP_AGE_GROUP=="<18", 1,
+                     ifelse(cleaning_df$PERP_AGE_GROUP=="18-24", 2,
+                     ifelse(cleaning_df$PERP_AGE_GROUP=="25-44", 3,
+                     ifelse(cleaning_df$PERP_AGE_GROUP=="45-64", 4, 5)))))
+# Repeat for victim age groupings
+cleaning_df$vic_cat <- as.factor(ifelse(cleaning_df$VIC_AGE_GROUP=="<18", 1,
+                     ifelse(cleaning_df$VIC_AGE_GROUP=="18-24", 2,
+                     ifelse(cleaning_df$VIC_AGE_GROUP=="25-44", 3,
+                     ifelse(cleaning_df$VIC_AGE_GROUP=="45-64", 4, 5)))))
+```
+
+Below is a histrogram showing the distribution of perpetrator age, followed by a histogram for victim ages.
+```{r, echo=TRUE}
+library(ggplot2)
+# Creating numeric representations of age grouping categories for analysis
+cleaning_df$perp_cat_numeric <- perp_cat_numeric <- as.numeric(as.character(cleaning_df$perp_cat))
+cleaning_df$vic_cat_numeric <- as.numeric(as.character(cleaning_df$vic_cat))
+
+# Creating histogram of perpetrator ages vs frequency of shooting incidents
+h1 <- ggplot(cleaning_df, aes(x=perp_cat_numeric)) + geom_histogram(binwidth = 1, fill='darkseagreen') + labs(title="Distribution of All Perpetrator Ages",
+        x="Perpetrator Age Group", y="Incident Reports") + theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+h1
+```
+```{r, echo=TRUE}
+# Creating histogram of victim ages vs frequency of shooting incidents
+h2 <- ggplot(cleaning_df, aes(x=vic_cat_numeric)) + geom_histogram(binwidth = 1, fill='darkseagreen') + labs(title="Distribution of All Victim Ages",
+        x="Victim Age Group", y="Incident Reports") + theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+h2
+```
+The following chart shows the interaction between perpetrator and victim age groups, with perpetrator ages on the x-axis and victim ages on the y-axis. The larger boxes show where there is greater overlap. 
+```{r, echo=TRUE}
+x_cat = cleaning_df$perp_cat
+y_cat = cleaning_df$vic_cat
+# Plotting the interaction between perpetrator and victim age groups by the frequency of shooting incidents between them
+plot(x_cat,y_cat, main="Comparison of Perpetrator vs Victim Age Groups", xlab="Perpetrator Age", ylab="Victim Age", breaks=c(1,2,3,4,5))
+```
+
+```{r, echo=TRUE}
+# Showing frequency of shooting incidents by age category in a tabular form.
+top_perp_age <- cleaning_df %>%
+  count(perp_cat)
+top_vic_age <- cleaning_df %>%
+  count(vic_cat)
+```
+
+```{r, echo=TRUE}
+# Showing interaction of perpetrator and victim ages in tabular form
+perp_vic_df <- cleaning_df %>%
+  group_by(PERP_AGE_GROUP, VIC_AGE_GROUP, .drop = FALSE) %>% count()
+```
+
+Perpetrators tend to be younger than 25, while victims of reported shooting incidents are most often between 25 and 44 years old. Even though the largest category of perpetrators are between 18 and 24 years old, shooting incidents occur most frequently between 25-44 year olds.
+
+The second most frequent category of reported shooting incidents is between 18-24 year olds. After this, the next two categories are the crossover of these two groups (18-24 year old perpetrators against 25-44 year old victims, followed by 25-44 year old perpetrators against 18-24 year old victims).
+
+Next, we will analyze the most common groupings of perpetrator and victim ages across each borough in NYC.
+```{r, echo=TRUE}
+# Getting count of shooting incidents by perp age, vic age, and borough
+geo_df <- cleaning_df %>%
+  group_by(PERP_AGE_GROUP, VIC_AGE_GROUP, BOROUGH, .drop = FALSE) %>% count()
+geo_df <- geo_df[order(geo_df$n, decreasing = TRUE), ] 
+# Creating geographic dataframe to collect data into categories by borough
+geo_summary <- geo_df %>%
+  group_by(BOROUGH) %>%
+  # Identifying most frequent pairing of perp-vic age groups by borough
+  filter(n==max(n))
+geo_summary
+```
+We see that this top category of 25-44 years old for both perpetrators and victims is consistent across all boroughs in New York.
+
+## Modeling Total Shooting Incident Reports Over Time
+This dataset contains records from January 2006 through December 2024. The goal in this section is to show how the number of incident reports has changed over this period, both over all age groups and specifically between the 25-44 victim and perpetrator groups. This will be done using simple linear regression.
+
+First we examine the trend over all age groups across the chosen time period.
+```{r, echo=TRUE}
+# Pull year of OCCUR_DATE for annual analysis
+cleaning_df$year = cleaning_df$OCCUR_DATE
+cleaning_df <- cleaning_df %>%
+  mutate(year = year(year))
+
+# Group by year to look at annual totals for all ages
+annual_grouping <- cleaning_df %>%
+  group_by(year, .drop = FALSE) %>% count()
+
+my_y = annual_grouping$n
+my_x = annual_grouping$year
+
+# Create simple linear regression model for dataset
+my_lm = lm(my_y ~ my_x, data=annual_grouping)
+summary(my_lm)
+
+# Plot observed and predicted values over time
+Year = annual_grouping$year
+Incidents = annual_grouping$n
+ggplot(annual_grouping, aes(x=Year, y=Incidents)) + labs(title="Shooting Incidents From 2006-2024", x="Year", y="Incidents") + 
+  geom_point(color='lightseagreen', bg='white') +
+  stat_smooth(method = "lm", col = "deeppink") + theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+```
+When we examine all age groups, we see that shootings overall have generally decreased year-over-year, based on a linear fit. There are some more extreme outliers from 2020-22, which is likely due to instability following the COVID-19 pandemic.
+
+When we repeat this analysis only looking at this most frequent age group of 25- to 44-year-olds, we see a vastly different result.
+```{r, echo=TRUE}
+# Pull year of OCCUR_DATE for annual analysis
+cleaning_df$year = cleaning_df$OCCUR_DATE
+cleaning_df <- cleaning_df %>%
+  mutate(year = year(year))
+
+# Filter cleaning_df to only look at perps and vics in the 25-44 range
+target_group <- cleaning_df %>%
+  filter(perp_cat==3 & vic_cat==3)
+
+# Group by year to look at annual totals for the chosen age range
+annual_grouping <- target_group %>%
+  group_by(year, .drop = FALSE) %>% count()
+
+my_next_y = annual_grouping$n
+my_next_x = annual_grouping$year
+
+# Create simple linear regression model for dataset
+my_lm = lm(my_next_y ~ my_next_x, data=annual_grouping)
+summary(my_lm)
+
+# Plot observed and predicted values over time
+Year = annual_grouping$year
+Incidents = annual_grouping$n
+ggplot(annual_grouping, aes(x=Year, y=Incidents)) + labs(title="Shooting Incidents in the 25-44 y.o. Age Group From 2006-2024", x="Year", y="Incidents") + 
+  geom_point(color='lightseagreen', bg='white') +
+  stat_smooth(method = "lm", col = "deeppink") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+```
+
+## Conclusion
+While the total number of reported shooting incidents appears to be trending downward, the 25-44 y.o. age group appears to have experienced an overall increase in shooting incidents over the time period from 2006 to 2024. This group shows the same exceptionally high data points in 2020-22 that are mirrored in the overall group. There are many possible reasons that this specific age group has experienced an uptick in gun violence, even as New York City tracks overall less gun violence over time. These causes may include changing social factors and comparative rates of police presence/intervention. In addition, this age group would have come of age during the 2008 US economic crash, and may also have experienced more pronounced career stagnation due to COVID than other groups that were either too young to be part of the workforce or old enough to have greater job security than the 25-44 year old group. Some combination of these economic factors may be responsible for this group's divergence from the overall downward trend in reported shooting incidents.
+
+## Accounting for Bias
+Some biases that may have affected my choice of this particular question include stereotypes about larger cities experiencing higher rates of violent crimes (including shooting incidents) in recent years. Many news outlets use rhetoric that sensationalizes the violence that occurs in these metropolitan centers, specifically New York City. To account for this, I made sure to analyze not only the age group with the highest amount of shooting incident reports, but also the overall trend for all age groups. In general, New York City has experienced lower numbers of shooting incidents over the past 18 years.
+
+This dataset is limited because it only includes incidents of gun violence that are reported to and recorded by the NYPD. There is a strong chance that not all shooting incidents are captured in this dataset, which could indicate that the real value is somewhat higher.
+In addition, the gaps in the age data are concentrated on the perpetrator's age, which is likely harder to capture since the shooter may be more likely to leave the site of an incident without reporting their age to law enforcement than a victim.
+Furthermore, if victims above the age of 24 are more likely to call and report shooting incidents to the police, then they are more likely to have their age as part of this record than people of other age groups. This could explain some part of why 25-44 year olds are so heavily represented in this dataset.
+
+
+```{r, echo=TRUE}
+sessionInfo()
+```
