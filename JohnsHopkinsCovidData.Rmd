@@ -1,0 +1,349 @@
+---
+title: "NYPD Shooting Incidents by Age Groupings and Borough"
+author: ''
+date: "2025-06-23"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Importing necessary libraries
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+```
+
+## Description of Data in This Report
+This dataset was provided by Johns Hopkins, and it is drawn from a series of publicly-available links to CSV files on Github.
+Those links are listed below with `url_head` + CSV name.
+
+```{r, echo=TRUE}
+# These links will download the raw data used in this report
+url_head = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+# Creating list of desired CSVs
+csv_names = c("time_series_covid19_confirmed_US.csv", "time_series_covid19_confirmed_global.csv", "time_series_covid19_deaths_US.csv", "time_series_covid19_deaths_global.csv")
+# Reading the raw data into a CSV
+url_names <- str_c(url_head, csv_names)
+if(!file.exists("Data")){dir.create("Data")}
+raw_us_cases <- read_csv(url_names[1])
+raw_global_cases <- read_csv(url_names[2])
+raw_us_deaths <- read_csv(url_names[3])
+raw_global_deaths <- read_csv(url_names[4])
+```
+```{r}
+raw_global_cases
+```
+
+This dataset contains a daily record of COVID-19 cases and deaths recorded and maintained by Johns Hopkins University. This data was extracted at the end of each day in the period between Jan 22nd 2020 and March 9th 2023, and includes information on the location and number of COVID cases worldwide, as well as with a US-specific focus.
+
+## Goal of Analysis
+This report attempts to analyze US cases per million over time, broken down by state and region.
+
+### Examining Data
+Looking at the summary of the raw data, the `cases` and `deaths` datasets can be better summarized to look at trends. I want to eventually tidy these records so that each date is on a separate row.
+
+First, I took a look at the actual data in its raw state.
+```{r, echo=TRUE}
+# Getting a summary of the raw data
+head(raw_us_cases)
+head(raw_global_cases)
+head(raw_us_deaths)
+head(raw_global_deaths)
+```
+
+Then I created a new df for each dataset to perform tidying and transformations, so I can always compare to the `raw_data` dataframes.
+```{r, echo=TRUE}
+# Working on a fresh copy of the raw data to preserve the original
+us_cases <- raw_us_cases
+global_cases <- raw_global_cases
+us_deaths <- raw_us_deaths
+global_deaths <- raw_global_deaths
+```
+
+### Tidying Data to Examine Dates as Rows
+```{r, echo=TRUE}
+# Convert all fields to examine as rows, except cols specified below
+global_cases <- global_cases %>%
+  pivot_longer(cols = -c(`Province/State`,
+                         `Country/Region`,
+                         `Lat`,
+                         `Long`),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(-c(Lat,Long))
+```
+
+```{r, echo=TRUE}
+# Convert all fields to examine as rows, except cols specified below
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c(`Province/State`,
+                         `Country/Region`,
+                         `Lat`,
+                         `Long`),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(-c(Lat,Long))
+```
+
+Then I combined the `global_cases` and `global_deaths` data into a single `global_df` for easier analysis.
+```{r, echo=TRUE}
+global_df <- global_cases %>%
+  full_join(global_deaths) %>%
+  # Some renaming of cols is needed to ensure the fields match up appropriately
+  rename(`Country_Region` = `Country/Region`,
+         `Province_State` = `Province/State`) %>%
+  mutate(date = mdy(date))
+```
+```{r, echo=TRUE}
+library(lubridate)
+# Making sure my data types look as expected
+global_df <- global_df %>%
+  mutate(`date` = as.Date(date))
+sapply(global_df, class)
+```
+
+The next step is to perform similar tidying on the US-specific dataframes.
+```{r, echo=TRUE}
+# Convert all fields to examine as rows, except cols specified below
+us_cases <- us_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+                         names_to = "date",
+                         values_to = "cases") %>%
+  select(`Admin2`:`cases`) %>%
+    mutate(`date` = mdy(`date`)) %>%
+    select(-c(`Lat`, `Long_`))
+```
+
+```{r, echo=TRUE}
+# Convert all fields to examine as rows, except cols specified below
+us_deaths <- us_deaths %>%
+  #mutate(Population = as.numeric(Population))
+  pivot_longer(cols = -(UID:Population),
+                         names_to = "date",
+                         values_to = "deaths") %>%
+  select(`Admin2`:`deaths`) %>%
+  mutate(`date` = mdy(`date`)) %>%
+  select(-c(`Lat`, `Long_`))
+```
+Now I could join the US data together to analyze holistically.
+```{r, echo=TRUE}
+us_df <- us_deaths %>%
+  full_join(us_cases)
+head(us_df)
+```
+
+Next I examined the maximum and minimum values in each column to ensure these are valid entries and not erroneous values.
+```{r}
+# Filter US cases >= 0
+us_df <- us_df %>%
+  filter(cases >= 0)
+# Filter US deaths >= 0
+us_df <- us_df %>%
+  filter(deaths >= 0)
+# Filter US records with NA date values
+us_df <- us_df %>%
+  filter(!is.na(date))
+```
+At this point, I was able to aggregate my `us_df` by state and province to set up the next stages of analysis.
+```{r, echo=TRUE}
+us_by_state <- us_df %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarise(cases = sum(cases),
+            deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mil = deaths *1000000 / Population) %>%
+  mutate(cases_per_mil = cases *1000000 / Population) %>%
+  select(Province_State, Country_Region, date, cases, deaths, cases_per_mil, deaths_per_mil, Population) %>%
+  ungroup()
+```
+
+Then I aggregated at the national level, so I can compare the growth of the virus countrywide against changes within each state.
+```{r, echo=TRUE}
+us_totals <- us_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarise(cases = sum(cases),
+            deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mil = deaths *1000000 / Population) %>%
+  mutate(cases_per_mil = cases *1000000 / Population) %>%
+  select(Country_Region, date, cases, deaths, cases_per_mil, deaths_per_mil, Population) %>%
+  ungroup()
+```
+
+From this point forward, I only need the US-specific dataset contained in `us_totals`.
+
+### Handling Missing Data
+I removed `NA` records from the date field, as well as erroneous entries for cases and deaths that fell below zero. Because I want to examine the entire growth curve over time for particular states and the US nationally, I kept 0 values for `cases` and `deaths` in the dataset.
+
+Between Jan 22nd 2020 and March 9th 2023, we are left with 1,143 complete records (a little over 3 years and 6 weeks) to analyze in the following steps.
+
+## Analysis
+### Comparing COVID Cases & Deaths Across Different US States
+I chose to analyze US states across different geographic regions, to compare their total cases/deaths against the US national level. These regions are determined by the US Census Bureau, and the list of states contained in each region is listed in the code chunks for each region. 
+
+1. West Coast
+2. Midwest
+3. South Central
+4. Northeast
+
+First I wanted to visualize the cases per million nationally.
+```{r, echo=TRUE}
+us_totals %>%
+  ggplot(aes(x=date, y=cases_per_mil)) +
+  geom_line(color='salmon') +
+  geom_point(color= 'salmon') +
+  scale_y_log10() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5), axis.text.x = element_text(angle = 0)) +
+  labs(title="US COVID Cases and Deaths per Million", x="Date", y="Cases per Million")
+```
+Next, I wanted to look across different regions (as defined by the US Census Bureau) and plot the cases per million for each target group of states.
+```{r, echo=TRUE}
+west_coast_states <- c("California", "Alaska", "Washington", "Oregon", "Hawaii")
+us_by_state %>%
+  filter(Province_State %in% west_coast_states) %>%
+  ggplot(aes(x=date, y=cases_per_mil)) +
+  geom_line(color='lightseagreen') +
+  geom_point(aes(colour = "Cases per Mil"), color='hotpink') +
+  scale_y_log10() +
+  labs(title="COVID-19 Cases per Million in West Coast States", x="Date", y="Cases per Million") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+```
+```{r, echo=TRUE}
+northeast_states <- c("Connecticut", "Maine", "Massachusetts", "New Hampshire", "Rhode Island", "Vermont")
+us_by_state %>%
+  filter(Province_State %in% northeast_states) %>%
+  ggplot(aes(x=date, y=cases_per_mil)) +
+  geom_line(colour = 'darkseagreen') +
+  geom_point(aes(colour = "Cases per Mil"), color='lightpink') +
+  scale_y_log10() +
+  labs(title="COVID-19 Cases per Million in Northeast States", x="Date", y="Cases per Million") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+
+```
+```{r, echo=TRUE}
+south_central_states <- c("Alabama", "Kentucky", "Mississippi", "Tennessee", "Arkansas", "Louisiana", "Oklahoma", "Texas")
+us_by_state %>%
+  filter(Province_State %in% south_central_states) %>%
+  ggplot(aes(x=date, y=cases_per_mil)) +
+  geom_line(colour = 'lightpink') +
+  geom_point(aes(colour = "Cases per Mil"), color='lightseagreen') +
+  scale_y_log10() +
+  labs(title="COVID-19 Cases per Million in South Central States", x="Date", y="Cases per Million") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+```
+```{r, echo=TRUE}
+midwest_states <- c("Illinois", "Indiana", "Michigan", "Ohio", "Wisconsin", "Iowa", "Kansas", "Minnesota", "Missouri", "Nebraska", "North Dakota", "South Dakota")
+us_by_state %>%
+  filter(Province_State %in% midwest_states) %>%
+  ggplot(aes(x=date, y=cases_per_mil)) +
+  geom_line(colour = 'hotpink') +
+  geom_point(aes(colour = "Cases per Mil"), color='powderblue') +
+  scale_y_log10() +
+  labs(title="COVID-19 Cases per Million in Midwest States", x="Date", y="Cases per Million") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+```
+
+It would be reasonable to assume that closely situated states (like states in the same region) would share similar characteristics in terms of the spread of infectious disease. When we consider a viral infection that is spread by person-to-person contact, this is even more evident.
+What is interesting about this analysis is that it shows differences in the closeness of states' case rates across different regions (measured in cases per million).
+
+For example, the trajectory of cases per million across a vast area composing the South Central states is tightly aligned, with much less variation over time than states in the Northeast region.
+
+The land area of the Northeast region is far smaller than that of the South Central states.
+When we look at the total population across each grouping, we see that the South Central region's population is about 4 times bigger than the Northeast.
+The largest state by population in the South Central region is bigger than the smallest South Central state by a factor of 10. The Northeast shows a roughly similar differential across its population range.
+```{r, echo=TRUE}
+# Getting the population by state for South Central region
+south_pops = us_by_state %>%
+  filter(Province_State %in% south_central_states) %>%
+  group_by(Province_State) %>%
+  summarise(Population = mean(Population)) %>%
+  select(Province_State, Population) %>%
+  ungroup()
+total_south_pop <- sum(south_pops$Population)
+south_pop_spread <-  min(south_pops$Population) / max(south_pops$Population)
+south_pop_spread
+```
+
+```{r, echo=TRUE}
+# Getting the population by state for Northeast Region
+ne_pops = us_by_state %>%
+  filter(Province_State %in% northeast_states) %>%
+  group_by(Province_State) %>%
+  summarise(Population = mean(Population)) %>%
+  select(Province_State, Population) %>%
+  ungroup()
+total_ne_pops <- sum(ne_pops$Population)
+ne_pop_spread <-  min(ne_pops$Population) / max(ne_pops$Population)
+ne_pop_spread
+```
+
+```{r, echo=TRUE}
+# Getting the population differential between South Central and Northeast states
+ne_south_spread = total_south_pop / total_ne_pops
+ne_south_spread
+```
+
+
+Although the land area is much smaller and the total population is about a quarter of the South Central region's, it is possible that a tighter clustering of population centers in the Northeast can contribute to more variation in regional cases-per-million trends based on how viruses pass between people. Additional data and analysis is needed to determine if there is any relationship between population density and cases per million.
+
+
+## Modeling Cases Per Million Over Time Across Regions
+Next, I analyzed two regions of the US to see how a linear regression prediction line fits the data from early 2020 (March 1st through June 30th).
+I am aware that the true behavior of this system is not truly linear, but for the purposes of this analysis I was curious to see how a linear fit performs on this very steep portion of the curve.
+I scaled both the real and predicted data using `scale_y_log10()` which is why the fit doesn't appear linear in the following charts. This allows it to better match the underlying data for each region.
+
+```{r, echo=TRUE}
+df_south <- us_by_state %>% filter(date >= '2020-03-01', date <= '2020-06-30', Province_State %in% south_central_states)
+x_south = df_south$date
+y_south = df_south$cases_per_mil
+lm_south <- lm(y_south ~ x_south, data=df_south)
+df_south <- df_south %>% mutate(pred = predict(lm_south))
+summary(lm_south)
+
+df_south %>%
+  ggplot(aes(x=date, y=cases_per_mil)) +
+  geom_line(colour = 'gold') +
+  geom_point(aes(colour = "Cases per Mil"), color='lightseagreen') +
+  geom_line(aes(x=date, y=pred), color='red') +
+  scale_y_log10() +
+  labs(title="COVID-19 Cases per Million in South Central States", x="Date", y="Cases per Million") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+```
+
+```{r, echo=TRUE}
+df_northeast <- us_by_state %>% filter(date >= '2020-03-01', date <= '2020-06-30', Province_State %in% northeast_states)
+x_northeast = df_northeast$date
+y_northeast = df_northeast$cases_per_mil
+lm_northeast <- lm(y_northeast ~ x_northeast, data=df_northeast)
+df_northeast <- df_northeast %>% mutate(pred = predict(lm_northeast))
+summary(lm_northeast)
+
+df_northeast %>%
+  ggplot(aes(x=date, y=cases_per_mil)) +
+  geom_line(colour = 'gold') +
+  geom_point(aes(colour = "Cases per Mil"), color='lightseagreen') +
+  geom_line(aes(x=date, y=pred)) +
+  geom_line(aes(x=date, y=pred), color='red') +
+  scale_y_log10() +
+  labs(title="COVID-19 Cases per Million in Northeast States", x="Date", y="Cases per Million") +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),axis.text.x = element_text(angle = 0))
+```
+
+## Conclusion
+
+The goal of this analysis was not to answer a specific analytical question, but rather to get some insight into how COVID cases per million differ across geographic regions of the US.
+We see that different groupings of states can have different variability in their cases per million, as with the Northeast and South Central regions. Additional analysis would be needed to determine whether population density has any effect on the cases per million of a particular grouping of states.
+
+In addition, we showed how a linear regression can be used to model cases per million over time in different regions of the US (on a limited timeframe of March 1st 2020 to Jun 30th 2020). These prediction lines show the Northeast region reaching 10,000 cases per million right at the end of June 2020, before the South Central Region reaches that benchmark.
+
+## Biases
+I chose this topic because I wanted to understand how different regions progressed through the COVID-19 pandemic in terms of cases per million. My own personal bias was an expectation of significantly higher rates of disease per million people occurring in the South Central region compared to places like the West Coast. It turned out to be very interesting to look at the inconsistencies across certain states within their own region, showing variability in case rates across regions.
+
+In addition, the systemic biases in this data may include under-reporting of COVID-19 cases and deaths. If certain geographic areas are more likely to under-report instances of disease, then this could bias the dataset to show a lower impact of COVID-19 in concentrated locations than there was in reality. This could be due to a lack of self-reporting, or because underserved communities may lack the resources to test every individual every time they get sick.
+
+
+```{r, echo=TRUE}
+sessionInfo()
+```
