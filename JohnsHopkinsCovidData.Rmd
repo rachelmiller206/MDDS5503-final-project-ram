@@ -16,7 +16,7 @@ library(ggplot2)
 ```
 
 ## Description of Data in This Report
-This dataset was provided by Johns Hopkins, and it is drawn from a series of publicly-available links to CSV files on Github.
+This dataset was provided by Johns Hopkins University, and it is drawn from a series of publicly-available links to CSV files on Github.
 Those links are listed below with `url_head` + CSV name.
 
 ```{r, echo=TRUE}
